@@ -6,3 +6,4 @@ dist/
 bun.lock
 .opencode/node_modules/
 .opencode/bun.lock
+.opencode/*.md

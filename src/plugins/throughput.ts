@@ -246,31 +246,13 @@ export const ThroughputPlugin: Plugin = async ({ client, directory }) => {
 
   function writePerfFile(entry: LogEntry) {
     if (!directory) return
-    const perfFile = path.join(directory, ".opencode", "perf.md")
-    const existing = stats.get(entry.model)
-    const avgTTFT = existing ? formatMs(existing.avgTTFT) : formatMs(entry.ttft_ms)
-    const avgTPS = existing ? formatNum(existing.avgTPS) : formatNum(entry.tps)
-    const avgLatency = existing ? formatMs(existing.avgLatency) : formatMs(entry.latency_ms)
-    const totalCost = existing ? existing.totalCost : entry.cost
-    const count = existing ? existing.count : 1
+    const throughputFile = path.join(directory, ".opencode", "throughput.md")
 
-    const content = [
-      `# Performance: ${entry.modelID}`,
-      ``,
-      `- **TTFT**: ${formatMs(entry.ttft_ms)} (avg ${avgTTFT})`,
-      `- **TPS**: ${formatNum(entry.tps)} tok/s (avg ${avgTPS})`,
-      `- **Latency**: ${formatMs(entry.latency_ms)} (avg ${avgLatency})`,
-      `- **Tokens**: ↑${formatNum(entry.inputTokens)} ↓${formatNum(entry.outputTokens)}`,
-      `- **Cost**: $${entry.cost.toFixed(4)} (total $${totalCost.toFixed(4)})`,
-      `- **Requests**: ${count}`,
-      `- **Time**: ${entry.ts}`,
-      ``,
-      `Use the \`benchmark\` tool for full history.`,
-    ].join("\n") + "\n"
+    const line = `${entry.ts} | ${entry.modelID} | TTFT ${formatMs(entry.ttft_ms)} | TPS ${formatNum(entry.tps)} tok/s | Latency ${formatMs(entry.latency_ms)} | ↑${formatNum(entry.inputTokens)} ↓${formatNum(entry.outputTokens)} ↓r${formatNum(entry.reasoningTokens)} | Cost $${entry.cost.toFixed(4)}${entry.finish && entry.finish !== "stop" ? " | " + entry.finish : ""}\n`
 
     try {
-      fs.mkdirSync(path.dirname(perfFile), { recursive: true })
-      fs.writeFileSync(perfFile, content, "utf-8")
+      fs.mkdirSync(path.dirname(throughputFile), { recursive: true })
+      fs.appendFileSync(throughputFile, line, "utf-8")
     } catch {}
   }
 
@@ -336,6 +318,19 @@ export const ThroughputPlugin: Plugin = async ({ client, directory }) => {
 
           const logMsg = buildLogMsg(entry)
           const variant = entry.finish === "error" ? "warn" : "info"
+          const toastVariant: "info" | "success" | "warning" | "error" =
+            entry.finish === "error" ? "warning" : "info"
+
+          try {
+            await client.tui.showToast({
+              body: {
+                title: "Throughput",
+                message: logMsg,
+                variant: toastVariant,
+                duration: 4000,
+              },
+            })
+          } catch {}
 
           try {
             await client.app.log({
