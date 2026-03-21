@@ -1,0 +1,8 @@
+node_modules/
+dist/
+*.js.map
+.DS_Store
+*.log
+bun.lock
+.opencode/node_modules/
+.opencode/bun.lock
