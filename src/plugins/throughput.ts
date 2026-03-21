@@ -280,6 +280,25 @@ export const ThroughputPlugin: Plugin = async ({ client }) => {
           const variant = entry.finish === "error" ? "error" : "success"
 
           try {
+            await client.app.log({
+              body: {
+                service: "opencode-throughput",
+                level: variant === "error" ? "warn" : "info",
+                message: toastMsg,
+                extra: {
+                  model: entry.model,
+                  ttft_ms: entry.ttft_ms,
+                  tps: entry.tps,
+                  latency_ms: entry.latency_ms,
+                  inputTokens: entry.inputTokens,
+                  outputTokens: entry.outputTokens,
+                  cost: entry.cost,
+                },
+              },
+            })
+          } catch {}
+
+          try {
             await client.tui.showToast({ body: { message: toastMsg, variant } })
           } catch {}
 

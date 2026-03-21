@@ -1,6 +1,6 @@
 {
   "name": "opencode-throughput",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Real-time LLM performance monitoring plugin for OpenCode. Tracks TTFT, TPS, latency, token usage and cost per model with toast notifications and JSONL logging.",
   "type": "module",
   "main": "./src/index.ts",
