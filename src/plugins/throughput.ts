@@ -67,6 +67,7 @@ function updateStats(stats: Map<string, ModelStats>, key: string, entry: LogEntr
 
 function formatNum(n: number | null): string {
   if (n == null) return "N/A"
+  if (n >= 1000000) return (n / 1000000).toFixed(2) + "M"
   if (n >= 1000) return (n / 1000).toFixed(1) + "k"
   return n.toFixed(n >= 100 ? 0 : 1)
 }
@@ -84,8 +85,9 @@ function appendLog(entry: LogEntry) {
   fs.appendFileSync(LOG_FILE, line, "utf-8")
 }
 
-function buildToast(entry: LogEntry): string {
-  const shortModel = entry.modelID.length > 28 ? entry.modelID.slice(0, 26) + ".." : entry.modelID
+function buildLogMsg(entry: LogEntry): string {
+  const shortModel =
+    entry.modelID.length > 28 ? entry.modelID.slice(0, 26) + ".." : entry.modelID
   const parts = [
     shortModel,
     formatMs(entry.ttft_ms) + " TTFT",
@@ -103,13 +105,6 @@ function readLogs(): LogEntry[] {
     .split("\n")
     .filter((l: string) => l.trim())
     .map((l: string) => JSON.parse(l) as LogEntry)
-}
-
-function formatNumFull(n: number | null): string {
-  if (n == null) return "N/A"
-  if (n >= 1000000) return (n / 1000000).toFixed(2) + "M"
-  if (n >= 1000) return (n / 1000).toFixed(1) + "k"
-  return n.toFixed(n >= 100 ? 0 : 1)
 }
 
 const benchmarkTool = tool({
@@ -134,11 +129,12 @@ const benchmarkTool = tool({
       return "No benchmark data yet. The throughput plugin needs to process at least one LLM response before stats are available."
     }
 
-    const filtered = args.model
+    const keyword = args.model?.toLowerCase()
+    const filtered = keyword
       ? logs.filter(
-          (l) =>
-            l.model.toLowerCase().includes(args.model!.toLowerCase()) ||
-            l.modelID.toLowerCase().includes(args.model!.toLowerCase())
+          (l: LogEntry) =>
+            l.model.toLowerCase().includes(keyword) ||
+            l.modelID.toLowerCase().includes(keyword)
         )
       : logs
 
@@ -160,45 +156,69 @@ const benchmarkTool = tool({
 
     for (const [model, entries] of byModel) {
       const count = entries.length
-      const ttfts = entries.filter((e) => e.ttft_ms != null).map((e) => e.ttft_ms!)
-      const latencies = entries.filter((e) => e.latency_ms != null).map((e) => e.latency_ms!)
-      const tpsList = entries.filter((e) => e.tps != null).map((e) => e.tps!)
+      const ttfts = entries
+        .filter((e: LogEntry) => e.ttft_ms != null)
+        .map((e: LogEntry) => e.ttft_ms!)
+      const latencies = entries
+        .filter((e: LogEntry) => e.latency_ms != null)
+        .map((e: LogEntry) => e.latency_ms!)
+      const tpsList = entries
+        .filter((e: LogEntry) => e.tps != null)
+        .map((e: LogEntry) => e.tps!)
 
       const avgTTFT =
-        ttfts.length > 0 ? ttfts.reduce((a, b) => a + b, 0) / ttfts.length : null
+        ttfts.length > 0 ? ttfts.reduce((a: number, b: number) => a + b, 0) / ttfts.length : null
       const minTTFT = ttfts.length > 0 ? Math.min(...ttfts) : null
       const maxTTFT = ttfts.length > 0 ? Math.max(...ttfts) : null
 
       const avgLatency =
-        latencies.length > 0 ? latencies.reduce((a, b) => a + b, 0) / latencies.length : null
+        latencies.length > 0
+          ? latencies.reduce((a: number, b: number) => a + b, 0) / latencies.length
+          : null
       const minLatency = latencies.length > 0 ? Math.min(...latencies) : null
       const maxLatency = latencies.length > 0 ? Math.max(...latencies) : null
 
       const avgTPS =
-        tpsList.length > 0 ? tpsList.reduce((a, b) => a + b, 0) / tpsList.length : null
+        tpsList.length > 0
+          ? tpsList.reduce((a: number, b: number) => a + b, 0) / tpsList.length
+          : null
       const maxTPS = tpsList.length > 0 ? Math.max(...tpsList) : null
 
-      const totalInput = entries.reduce((s, e) => s + e.inputTokens, 0)
-      const totalOutput = entries.reduce((s, e) => s + e.outputTokens, 0)
-      const totalReasoning = entries.reduce((s, e) => s + e.reasoningTokens, 0)
-      const totalCacheRead = entries.reduce((s, e) => s + e.cacheReadTokens, 0)
-      const totalCost = entries.reduce((s, e) => s + e.cost, 0)
+      const totalInput = entries.reduce((s: number, e: LogEntry) => s + e.inputTokens, 0)
+      const totalOutput = entries.reduce((s: number, e: LogEntry) => s + e.outputTokens, 0)
+      const totalReasoning = entries.reduce(
+        (s: number, e: LogEntry) => s + e.reasoningTokens,
+        0
+      )
+      const totalCacheRead = entries.reduce(
+        (s: number, e: LogEntry) => s + e.cacheReadTokens,
+        0
+      )
+      const totalCacheWrite = entries.reduce(
+        (s: number, e: LogEntry) => s + e.cacheWriteTokens,
+        0
+      )
+      const totalCost = entries.reduce((s: number, e: LogEntry) => s + e.cost, 0)
 
       lines.push(`### ${model}`)
       lines.push(`  Requests: ${count}`)
       lines.push(``)
       lines.push(`  **Latency:**`)
-      lines.push(`    TTFT:  avg ${formatMs(avgTTFT)} | min ${formatMs(minTTFT)} | max ${formatMs(maxTTFT)}`)
-      lines.push(`    Total: avg ${formatMs(avgLatency)} | min ${formatMs(minLatency)} | max ${formatMs(maxLatency)}`)
+      lines.push(
+        `    TTFT:  avg ${formatMs(avgTTFT)} | min ${formatMs(minTTFT)} | max ${formatMs(maxTTFT)}`
+      )
+      lines.push(
+        `    Total: avg ${formatMs(avgLatency)} | min ${formatMs(minLatency)} | max ${formatMs(maxLatency)}`
+      )
       lines.push(``)
       lines.push(`  **Throughput:**`)
-      lines.push(`    TPS:  avg ${formatNumFull(avgTPS)} | max ${formatNumFull(maxTPS)}`)
+      lines.push(`    TPS:  avg ${formatNum(avgTPS)} | max ${formatNum(maxTPS)}`)
       lines.push(``)
       lines.push(`  **Tokens:**`)
-      lines.push(`    Input:     ${formatNumFull(totalInput)}`)
-      lines.push(`    Output:    ${formatNumFull(totalOutput)}`)
-      lines.push(`    Reasoning: ${formatNumFull(totalReasoning)}`)
-      lines.push(`    Cache R:   ${formatNumFull(totalCacheRead)}`)
+      lines.push(`    Input:     ${formatNum(totalInput)}`)
+      lines.push(`    Output:    ${formatNum(totalOutput)}`)
+      lines.push(`    Reasoning: ${formatNum(totalReasoning)}`)
+      lines.push(`    Cache R/W: ${formatNum(totalCacheRead)} / ${formatNum(totalCacheWrite)}`)
       lines.push(``)
       lines.push(`  **Cost:** $${totalCost.toFixed(4)}`)
 
@@ -207,7 +227,7 @@ const benchmarkTool = tool({
         lines.push(`  Recent entries:`)
         for (const e of entries) {
           lines.push(
-            `    ${e.ts} | ${formatMs(e.ttft_ms)} TTFT | ${formatNumFull(e.tps)} tok/s | ${formatMs(e.latency_ms)} | cost $${e.cost.toFixed(4)}`
+            `    ${e.ts} | ${formatMs(e.ttft_ms)} TTFT | ${formatNum(e.tps)} tok/s | ${formatMs(e.latency_ms)} | cost $${e.cost.toFixed(4)}`
           )
         }
       }
@@ -219,10 +239,40 @@ const benchmarkTool = tool({
   },
 })
 
-export const ThroughputPlugin: Plugin = async ({ client }) => {
+export const ThroughputPlugin: Plugin = async ({ client, directory }) => {
   const stats = new Map<string, ModelStats>()
   const firstPartTime = new Map<string, number>()
   const msgCreatedTime = new Map<string, number>()
+
+  function writePerfFile(entry: LogEntry) {
+    if (!directory) return
+    const perfFile = path.join(directory, ".opencode", "perf.md")
+    const existing = stats.get(entry.model)
+    const avgTTFT = existing ? formatMs(existing.avgTTFT) : formatMs(entry.ttft_ms)
+    const avgTPS = existing ? formatNum(existing.avgTPS) : formatNum(entry.tps)
+    const avgLatency = existing ? formatMs(existing.avgLatency) : formatMs(entry.latency_ms)
+    const totalCost = existing ? existing.totalCost : entry.cost
+    const count = existing ? existing.count : 1
+
+    const content = [
+      `# Performance: ${entry.modelID}`,
+      ``,
+      `- **TTFT**: ${formatMs(entry.ttft_ms)} (avg ${avgTTFT})`,
+      `- **TPS**: ${formatNum(entry.tps)} tok/s (avg ${avgTPS})`,
+      `- **Latency**: ${formatMs(entry.latency_ms)} (avg ${avgLatency})`,
+      `- **Tokens**: ↑${formatNum(entry.inputTokens)} ↓${formatNum(entry.outputTokens)}`,
+      `- **Cost**: $${entry.cost.toFixed(4)} (total $${totalCost.toFixed(4)})`,
+      `- **Requests**: ${count}`,
+      `- **Time**: ${entry.ts}`,
+      ``,
+      `Use the \`benchmark\` tool for full history.`,
+    ].join("\n") + "\n"
+
+    try {
+      fs.mkdirSync(path.dirname(perfFile), { recursive: true })
+      fs.writeFileSync(perfFile, content, "utf-8")
+    } catch {}
+  }
 
   return {
     tool: {
@@ -243,6 +293,13 @@ export const ThroughputPlugin: Plugin = async ({ client }) => {
         if (info.time?.completed) {
           const created = info.time.created as number
           const completed = info.time.completed as number
+
+          if (!created || !completed) {
+            firstPartTime.delete(msgID)
+            msgCreatedTime.delete(msgID)
+            return
+          }
+
           const latencyMs = completed - created
           const firstPart = firstPartTime.get(msgID)
           const ttftMs = firstPart ? firstPart - created : null
@@ -275,16 +332,17 @@ export const ThroughputPlugin: Plugin = async ({ client }) => {
 
           updateStats(stats, modelKey, entry)
           appendLog(entry)
+          writePerfFile(entry)
 
-          const toastMsg = buildToast(entry)
-          const variant = entry.finish === "error" ? "error" : "success"
+          const logMsg = buildLogMsg(entry)
+          const variant = entry.finish === "error" ? "warn" : "info"
 
           try {
             await client.app.log({
               body: {
                 service: "opencode-throughput",
-                level: variant === "error" ? "warn" : "info",
-                message: toastMsg,
+                level: variant,
+                message: logMsg,
                 extra: {
                   model: entry.model,
                   ttft_ms: entry.ttft_ms,
@@ -298,13 +356,23 @@ export const ThroughputPlugin: Plugin = async ({ client }) => {
             })
           } catch {}
 
-          try {
-            await client.tui.showToast({ body: { message: toastMsg, variant } })
-          } catch {}
-
           firstPartTime.delete(msgID)
           msgCreatedTime.delete(msgID)
         }
+      }
+
+      if (event.type === "message.removed") {
+        const props = event.properties as any
+        const msgID = props?.info?.id ?? props?.messageID
+        if (msgID) {
+          firstPartTime.delete(msgID as string)
+          msgCreatedTime.delete(msgID as string)
+        }
+      }
+
+      if (event.type === "session.error") {
+        firstPartTime.clear()
+        msgCreatedTime.clear()
       }
 
       if (event.type === "message.part.updated") {
