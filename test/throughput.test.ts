@@ -1,3 +1,8 @@
+// IMPORTANT: These tests must NEVER read, write, unlink, or hash the
+// developer's real log file at ~/.opencode/throughput.jsonl. The plugin
+// resolves its log path lazily from process.env.OPENCODE_THROUGHPUT_LOG, so
+// beforeEach points that env var at a per-test temp file and afterEach restores
+// it. Do NOT reintroduce os.homedir() or any backup/unlink of the real log.
 import { describe, test, expect, beforeEach, afterEach } from "bun:test"
 import fs from "fs"
 import os from "os"
@@ -5,11 +10,11 @@ import path from "path"
 import type { LogEntry } from "../src/types.js"
 
 const TEST_DIR = path.join(os.tmpdir(), "opencode-throughput-test-" + process.pid)
-const REAL_LOG_DIR = path.join(os.homedir(), ".opencode")
-const REAL_LOG_FILE = path.join(REAL_LOG_DIR, "throughput.jsonl")
 
 const logCalls: Array<{ service: string; level: string; message: string; extra: any }> = []
 let baseLogCount = 0
+let testLogSeq = 0
+let prevLogEnv: string | undefined
 
 const mockClient = {
   app: {
@@ -20,25 +25,18 @@ const mockClient = {
   },
 }
 
+function testLogFile(): string {
+  return process.env.OPENCODE_THROUGHPUT_LOG as string
+}
+
 function getLogContent(): LogEntry[] {
-  if (!fs.existsSync(REAL_LOG_FILE)) return []
+  const file = testLogFile()
+  if (!file || !fs.existsSync(file)) return []
   return fs
-    .readFileSync(REAL_LOG_FILE, "utf-8")
+    .readFileSync(file, "utf-8")
     .split("\n")
     .filter((l: string) => l.trim())
     .map((l: string) => JSON.parse(l) as LogEntry)
-}
-
-function removeLastLineFromLog() {
-  if (!fs.existsSync(REAL_LOG_FILE)) return
-  const content = fs.readFileSync(REAL_LOG_FILE, "utf-8")
-  const lines = content.split("\n").filter((l: string) => l.trim())
-  if (lines.length === 0) {
-    fs.unlinkSync(REAL_LOG_FILE)
-  } else {
-    lines.pop()
-    fs.writeFileSync(REAL_LOG_FILE, lines.join("\n") + "\n", "utf-8")
-  }
 }
 
 function makeAssistantMessage(overrides: Record<string, any> = {}) {
@@ -67,21 +65,25 @@ function snapshotNewEntries(): LogEntry[] {
   return all.slice(baseLogCount)
 }
 
-function cleanupNewEntries() {
-  const all = getLogContent()
-  const toRemove = all.length - baseLogCount
-  for (let i = 0; i < toRemove; i++) {
-    removeLastLineFromLog()
-  }
-}
-
 beforeEach(() => {
   logCalls.length = 0
-  baseLogCount = getLogContent().length
+  prevLogEnv = process.env.OPENCODE_THROUGHPUT_LOG
+  fs.mkdirSync(TEST_DIR, { recursive: true })
+  const file = path.join(TEST_DIR, `log-${testLogSeq++}.jsonl`)
+  fs.rmSync(file, { force: true })
+  process.env.OPENCODE_THROUGHPUT_LOG = file
+  baseLogCount = 0
 })
 
 afterEach(() => {
-  cleanupNewEntries()
+  if (prevLogEnv === undefined) {
+    delete process.env.OPENCODE_THROUGHPUT_LOG
+  } else {
+    process.env.OPENCODE_THROUGHPUT_LOG = prevLogEnv
+  }
+  try {
+    fs.rmSync(TEST_DIR, { recursive: true, force: true })
+  } catch {}
 })
 
 describe("event handling: complete flow", () => {
@@ -164,18 +166,54 @@ describe("event handling: complete flow", () => {
     expect(logs[0].ttft_ms).toBeNull()
   })
 
-  test("no TTFT when part is not text type", async () => {
+  test("reasoning part produces TTFT", async () => {
     const hooks = await createPlugin()
+    const createdTime = Date.now() - 5000
 
     await hooks.event!({
       event: {
         type: "message.part.updated",
         properties: {
           part: {
-            type: "tool_use",
+            type: "reasoning",
             messageID: "msg-1",
-            time: { start: Date.now() - 3000 },
+            time: { start: createdTime + 1500 },
           },
+        },
+      } as any,
+    })
+
+    await hooks.event!({
+      event: {
+        type: "message.updated",
+        properties: {
+          info: makeAssistantMessage({
+            time: { created: createdTime, completed: createdTime + 5000 },
+          }),
+        },
+      } as any,
+    })
+
+    expect(logCalls[0].extra.ttft_ms).toBe(1500)
+  })
+
+  test("step-start / tool part without time.start does not produce TTFT", async () => {
+    const hooks = await createPlugin()
+
+    await hooks.event!({
+      event: {
+        type: "message.part.updated",
+        properties: {
+          part: { type: "step-start", messageID: "msg-1" },
+        },
+      } as any,
+    })
+
+    await hooks.event!({
+      event: {
+        type: "message.part.updated",
+        properties: {
+          part: { type: "tool", messageID: "msg-1", state: { status: "pending" } },
         },
       } as any,
     })
@@ -297,7 +335,7 @@ describe("edge cases", () => {
     expect(logCalls[0].level).toBe("warn")
   })
 
-  test("zero output tokens: TPS is null", async () => {
+  test("zero output and zero reasoning tokens: TPS is null", async () => {
     const hooks = await createPlugin()
 
     await hooks.event!({
@@ -313,6 +351,159 @@ describe("edge cases", () => {
     })
 
     expect(logCalls[0].extra.tps).toBeNull()
+  })
+
+  test("zero output but reasoning tokens: TPS is non-null", async () => {
+    const hooks = await createPlugin()
+    const createdTime = Date.now() - 5000
+
+    await hooks.event!({
+      event: {
+        type: "message.part.updated",
+        properties: {
+          part: { type: "text", messageID: "msg-1", time: { start: createdTime + 1000 } },
+        },
+      } as any,
+    })
+
+    await hooks.event!({
+      event: {
+        type: "message.updated",
+        properties: {
+          info: makeAssistantMessage({
+            tokens: { input: 1000, output: 0, reasoning: 300, cache: { read: 0, write: 0 } },
+            time: { created: createdTime, completed: createdTime + 5000 },
+          }),
+        },
+      } as any,
+    })
+
+    expect(logCalls[0].extra.tps).not.toBeNull()
+    // genMs = 5000 - 1000 = 4000; tokens = 0 + 300 = 300
+    expect(logCalls[0].extra.tps).toBeCloseTo((300 / 4000) * 1000, 5)
+  })
+
+  test("reasoning-only message: TTFT from reasoning part, TPS uses output + reasoning", async () => {
+    const hooks = await createPlugin()
+    const createdTime = Date.now() - 5000
+
+    await hooks.event!({
+      event: {
+        type: "message.part.updated",
+        properties: {
+          part: { type: "reasoning", messageID: "msg-1", time: { start: createdTime + 2000 } },
+        },
+      } as any,
+    })
+
+    await hooks.event!({
+      event: {
+        type: "message.updated",
+        properties: {
+          info: makeAssistantMessage({
+            tokens: { input: 1000, output: 100, reasoning: 400, cache: { read: 0, write: 0 } },
+            time: { created: createdTime, completed: createdTime + 5000 },
+          }),
+        },
+      } as any,
+    })
+
+    expect(logCalls[0].extra.ttft_ms).toBe(2000)
+    // genMs = 5000 - 2000 = 3000; tokens = 100 + 400 = 500
+    const logs = snapshotNewEntries()
+    expect(logs[0].reasoningTokens).toBe(400)
+    expect(logs[0].tps).toBeCloseTo((500 / 3000) * 1000, 5)
+  })
+
+  test("tool execution time is excluded from the TPS denominator", async () => {
+    const hooks = await createPlugin()
+    const createdTime = Date.now() - 10000
+    const completedTime = createdTime + 10000
+
+    await hooks.event!({
+      event: {
+        type: "message.part.updated",
+        properties: {
+          part: { type: "text", messageID: "msg-1", time: { start: createdTime + 1000 } },
+        },
+      } as any,
+    })
+
+    // First tool arrives pending (no time), then running at +3000.
+    await hooks.event!({
+      event: {
+        type: "message.part.updated",
+        properties: {
+          part: { type: "tool", messageID: "msg-1", state: { status: "pending" } },
+        },
+      } as any,
+    })
+    await hooks.event!({
+      event: {
+        type: "message.part.updated",
+        properties: {
+          part: {
+            type: "tool",
+            messageID: "msg-1",
+            state: { status: "running", time: { start: createdTime + 3000 } },
+          },
+        },
+      } as any,
+    })
+
+    await hooks.event!({
+      event: {
+        type: "message.updated",
+        properties: {
+          info: makeAssistantMessage({
+            tokens: { input: 1000, output: 200, reasoning: 100, cache: { read: 0, write: 0 } },
+            time: { created: createdTime, completed: completedTime },
+          }),
+        },
+      } as any,
+    })
+
+    const logs = snapshotNewEntries()
+    // genMs = 3000 - 1000 = 2000; tokens = 200 + 100 = 300 -> 150 tok/s
+    expect(logs[0].tps).toBeCloseTo(150, 5)
+    // Whole-latency TPS would be only (300 / 10000) * 1000 = 30 tok/s.
+    expect(logs[0].tps!).toBeGreaterThan((300 / 10000) * 1000)
+    expect(logs[0].latency_ms).toBe(10000)
+  })
+
+  test("step-start part is ignored and does not zero out TTFT", async () => {
+    const hooks = await createPlugin()
+    const createdTime = Date.now() - 5000
+
+    await hooks.event!({
+      event: {
+        type: "message.part.updated",
+        properties: {
+          part: { type: "step-start", messageID: "msg-1" },
+        },
+      } as any,
+    })
+    await hooks.event!({
+      event: {
+        type: "message.part.updated",
+        properties: {
+          part: { type: "reasoning", messageID: "msg-1", time: { start: createdTime + 2000 } },
+        },
+      } as any,
+    })
+
+    await hooks.event!({
+      event: {
+        type: "message.updated",
+        properties: {
+          info: makeAssistantMessage({
+            time: { created: createdTime, completed: createdTime + 5000 },
+          }),
+        },
+      } as any,
+    })
+
+    expect(logCalls[0].extra.ttft_ms).toBe(2000)
   })
 
   test("missing tokens field: defaults to 0", async () => {
@@ -512,24 +703,6 @@ describe("log message format", () => {
 })
 
 describe("benchmark tool", () => {
-  let backupContent: string | null = null
-  const LOG_FILE = path.join(os.homedir(), ".opencode", "throughput.jsonl")
-
-  beforeEach(() => {
-    if (fs.existsSync(LOG_FILE)) {
-      backupContent = fs.readFileSync(LOG_FILE, "utf-8")
-      fs.unlinkSync(LOG_FILE)
-    }
-  })
-
-  afterEach(() => {
-    if (fs.existsSync(LOG_FILE)) fs.unlinkSync(LOG_FILE)
-    if (backupContent !== null) {
-      fs.writeFileSync(LOG_FILE, backupContent, "utf-8")
-      backupContent = null
-    }
-  })
-
   async function createPluginWithBenchmark() {
     const { ThroughputPlugin } = await import("../src/plugins/throughput.js")
     const hooks = await ThroughputPlugin({ client: mockClient } as any)
@@ -537,9 +710,10 @@ describe("benchmark tool", () => {
   }
 
   function writeTestLogs(entries: LogEntry[]) {
-    fs.mkdirSync(path.dirname(LOG_FILE), { recursive: true })
+    const file = testLogFile()
+    fs.mkdirSync(path.dirname(file), { recursive: true })
     const lines = entries.map((e) => JSON.stringify(e)).join("\n") + "\n"
-    fs.writeFileSync(LOG_FILE, lines, "utf-8")
+    fs.writeFileSync(file, lines, "utf-8")
   }
 
   test("no data: returns helpful message", async () => {

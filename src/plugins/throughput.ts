@@ -1,68 +1,29 @@
 import type { Plugin } from "@opencode-ai/plugin"
 import { tool } from "@opencode-ai/plugin"
-import type { LogEntry, ModelStats } from "../types.js"
+import type { LogEntry } from "../types.js"
 import path from "path"
 import fs from "fs"
 import os from "os"
 
-const LOG_DIR = path.join(os.homedir(), ".opencode")
-const LOG_FILE = path.join(LOG_DIR, "throughput.jsonl")
+// Resolved lazily (at call time) so tests can point OPENCODE_THROUGHPUT_LOG at
+// a temp file after this module is imported. When unset, behavior is identical
+// to the historical hard-coded path: ~/.opencode/throughput.jsonl
+function logFile(): string {
+  return (
+    process.env.OPENCODE_THROUGHPUT_LOG ??
+    path.join(os.homedir(), ".opencode", "throughput.jsonl")
+  )
+}
 
 function ensureLogDir() {
-  if (!fs.existsSync(LOG_DIR)) {
-    fs.mkdirSync(LOG_DIR, { recursive: true })
+  const dir = path.dirname(logFile())
+  if (!fs.existsSync(dir)) {
+    fs.mkdirSync(dir, { recursive: true })
   }
 }
 
 function getModelKey(providerID: string, modelID: string): string {
   return `${providerID}/${modelID}`
-}
-
-function updateStats(stats: Map<string, ModelStats>, key: string, entry: LogEntry) {
-  const existing = stats.get(key)
-  if (!existing) {
-    stats.set(key, {
-      model: key,
-      count: 1,
-      avgTTFT: entry.ttft_ms ?? 0,
-      avgTPS: entry.tps ?? 0,
-      avgLatency: entry.latency_ms ?? 0,
-      minTTFT: entry.ttft_ms ?? Infinity,
-      maxTTFT: entry.ttft_ms ?? 0,
-      minLatency: entry.latency_ms ?? Infinity,
-      maxLatency: entry.latency_ms ?? 0,
-      totalInputTokens: entry.inputTokens,
-      totalOutputTokens: entry.outputTokens,
-      totalReasoningTokens: entry.reasoningTokens,
-      totalCacheReadTokens: entry.cacheReadTokens,
-      totalCacheWriteTokens: entry.cacheWriteTokens,
-      totalCost: entry.cost,
-      lastUpdated: Date.now(),
-    })
-    return
-  }
-
-  const c = existing.count + 1
-  existing.count = c
-  existing.avgTTFT = (existing.avgTTFT * (c - 1) + (entry.ttft_ms ?? 0)) / c
-  existing.avgTPS = (existing.avgTPS * (c - 1) + (entry.tps ?? 0)) / c
-  existing.avgLatency = (existing.avgLatency * (c - 1) + (entry.latency_ms ?? 0)) / c
-  if (entry.ttft_ms != null) {
-    existing.minTTFT = Math.min(existing.minTTFT, entry.ttft_ms)
-    existing.maxTTFT = Math.max(existing.maxTTFT, entry.ttft_ms)
-  }
-  if (entry.latency_ms != null) {
-    existing.minLatency = Math.min(existing.minLatency, entry.latency_ms)
-    existing.maxLatency = Math.max(existing.maxLatency, entry.latency_ms)
-  }
-  existing.totalInputTokens += entry.inputTokens
-  existing.totalOutputTokens += entry.outputTokens
-  existing.totalReasoningTokens += entry.reasoningTokens
-  existing.totalCacheReadTokens += entry.cacheReadTokens
-  existing.totalCacheWriteTokens += entry.cacheWriteTokens
-  existing.totalCost += entry.cost
-  existing.lastUpdated = Date.now()
-  stats.set(key, existing)
 }
 
 function formatNum(n: number | null): string {
@@ -82,7 +43,7 @@ function formatMs(ms: number | null): string {
 function appendLog(entry: LogEntry) {
   ensureLogDir()
   const line = JSON.stringify(entry) + "\n"
-  fs.appendFileSync(LOG_FILE, line, "utf-8")
+  fs.appendFileSync(logFile(), line, "utf-8")
 }
 
 function buildLogMsg(entry: LogEntry): string {
@@ -99,8 +60,9 @@ function buildLogMsg(entry: LogEntry): string {
 }
 
 function readLogs(): LogEntry[] {
-  if (!fs.existsSync(LOG_FILE)) return []
-  const content = fs.readFileSync(LOG_FILE, "utf-8")
+  const file = logFile()
+  if (!fs.existsSync(file)) return []
+  const content = fs.readFileSync(file, "utf-8")
   return content
     .split("\n")
     .filter((l: string) => l.trim())
@@ -240,8 +202,8 @@ const benchmarkTool = tool({
 })
 
 export const ThroughputPlugin: Plugin = async ({ client, directory }) => {
-  const stats = new Map<string, ModelStats>()
   const firstPartTime = new Map<string, number>()
+  const firstToolStart = new Map<string, number>()
   const msgCreatedTime = new Map<string, number>()
 
   function writePerfFile(entry: LogEntry) {
@@ -278,16 +240,34 @@ export const ThroughputPlugin: Plugin = async ({ client, directory }) => {
 
           if (!created || !completed) {
             firstPartTime.delete(msgID)
+            firstToolStart.delete(msgID)
             msgCreatedTime.delete(msgID)
             return
           }
 
           const latencyMs = completed - created
-          const firstPart = firstPartTime.get(msgID)
-          const ttftMs = firstPart ? firstPart - created : null
+
+          // genStart: first text/reasoning part carrying a finite time.start.
+          // genEnd: earliest observed tool execution start (or completed).
+          const genStart = firstPartTime.get(msgID)
+          const toolStart = firstToolStart.get(msgID)
+          let genEnd = toolStart !== undefined ? toolStart : completed
+          if (genStart !== undefined && genEnd < genStart) genEnd = completed
+
+          const ttftRaw = genStart !== undefined ? genStart - created : null
+          const ttftMs =
+            ttftRaw !== null && Number.isFinite(ttftRaw) && ttftRaw >= 0 ? ttftRaw : null
+
           const outputTokens = (info.tokens?.output as number) ?? 0
-          const genTimeMs = firstPart ? completed - firstPart : latencyMs
-          const tps = genTimeMs > 0 && outputTokens > 0 ? (outputTokens / genTimeMs) * 1000 : null
+          const reasoningTokens = (info.tokens?.reasoning as number) ?? 0
+          const totalGenTokens = outputTokens + reasoningTokens
+
+          const genMs = genStart !== undefined ? genEnd - genStart : null
+          const tpsRaw =
+            genMs !== null && genMs > 0 && totalGenTokens > 0
+              ? (totalGenTokens / genMs) * 1000
+              : null
+          const tps = tpsRaw !== null && Number.isFinite(tpsRaw) && tpsRaw >= 0 ? tpsRaw : null
 
           const providerID = (info.providerID as string) ?? ""
           const modelID = (info.modelID as string) ?? ""
@@ -305,14 +285,13 @@ export const ThroughputPlugin: Plugin = async ({ client, directory }) => {
             latency_ms: latencyMs,
             inputTokens: (info.tokens?.input as number) ?? 0,
             outputTokens,
-            reasoningTokens: (info.tokens?.reasoning as number) ?? 0,
+            reasoningTokens,
             cacheReadTokens: (info.tokens?.cache?.read as number) ?? 0,
             cacheWriteTokens: (info.tokens?.cache?.write as number) ?? 0,
             cost: (info.cost as number) ?? 0,
             finish: info.finish as string | undefined,
           }
 
-          updateStats(stats, modelKey, entry)
           appendLog(entry)
           writePerfFile(entry)
 
@@ -352,6 +331,7 @@ export const ThroughputPlugin: Plugin = async ({ client, directory }) => {
           } catch {}
 
           firstPartTime.delete(msgID)
+          firstToolStart.delete(msgID)
           msgCreatedTime.delete(msgID)
         }
       }
@@ -361,12 +341,14 @@ export const ThroughputPlugin: Plugin = async ({ client, directory }) => {
         const msgID = props?.info?.id ?? props?.messageID
         if (msgID) {
           firstPartTime.delete(msgID as string)
+          firstToolStart.delete(msgID as string)
           msgCreatedTime.delete(msgID as string)
         }
       }
 
       if (event.type === "session.error") {
         firstPartTime.clear()
+        firstToolStart.clear()
         msgCreatedTime.clear()
       }
 
@@ -375,8 +357,23 @@ export const ThroughputPlugin: Plugin = async ({ client, directory }) => {
         if (!part) return
 
         const msgID = part.messageID as string
-        if (part.type === "text" && part.time?.start && !firstPartTime.has(msgID)) {
-          firstPartTime.set(msgID, part.time.start)
+        if (!msgID) return
+
+        // Only TextPart / ReasoningPart carry a meaningful time.start.
+        if (part.type === "text" || part.type === "reasoning") {
+          const start = part.time?.start
+          if (Number.isFinite(start) && !firstPartTime.has(msgID)) {
+            firstPartTime.set(msgID, start as number)
+          }
+        } else if (part.type === "tool") {
+          // ToolPart.state.time.start = when the first tool began executing.
+          const start = part.state?.time?.start
+          if (Number.isFinite(start)) {
+            const existing = firstToolStart.get(msgID)
+            if (existing === undefined || (start as number) < existing) {
+              firstToolStart.set(msgID, start as number)
+            }
+          }
         }
       }
     },

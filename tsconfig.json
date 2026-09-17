@@ -4,12 +4,14 @@
     "module": "ESNext",
     "moduleResolution": "bundler",
     "esModuleInterop": true,
+    "jsx": "preserve",
+    "jsxImportSource": "@opentui/solid",
     "strict": true,
     "skipLibCheck": true,
     "declaration": true,
     "outDir": "./dist",
     "rootDir": "./src"
   },
-  "include": ["src/**/*.ts"],
+  "include": ["src/**/*.ts", "src/**/*.tsx"],
   "exclude": ["node_modules", "dist"]
 }
