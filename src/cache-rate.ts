@@ -71,3 +71,26 @@ export function formatCacheLine(tokens: PromptTokens): string | null {
     formatTokenCount(promptTokensTotal(tokens))
   )
 }
+
+/**
+ * Tone buckets for the session-wide cache line and the compact per-row hit rates.
+ * Thresholds are intentionally coarse: they only drive color, not the number.
+ */
+export type HitRateTone = "good" | "fair" | "poor" | "none"
+
+/** Tone thresholds shared by the session-wide cache line and the new per-row hit rates. */
+export function hitRateTone(rate: number | null): HitRateTone {
+  if (rate === null) return "none"
+  if (rate >= 0.7) return "good"
+  if (rate >= 0.4) return "fair"
+  return "poor"
+}
+
+/**
+ * Compact per-row form: integer percent, e.g. "83%"; null -> "N/A".
+ * The session-wide line keeps the one-decimal `formatCacheLine`.
+ */
+export function formatHitPercent(rate: number | null): string {
+  if (rate === null) return "N/A"
+  return Math.round(rate * 100) + "%"
+}

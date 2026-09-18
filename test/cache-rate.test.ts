@@ -2,7 +2,9 @@ import { describe, test, expect } from "bun:test"
 import {
   cacheHitRate,
   formatCacheLine,
+  formatHitPercent,
   formatTokenCount,
+  hitRateTone,
   promptTokensTotal,
 } from "../src/cache-rate.js"
 
@@ -82,5 +84,32 @@ describe("formatTokenCount", () => {
     expect(formatTokenCount(1000)).toBe("1.0k")
     expect(formatTokenCount(14845)).toBe("14.8k")
     expect(formatTokenCount(2000000)).toBe("2.00M")
+  })
+})
+
+describe("hitRateTone", () => {
+  test("null is 'none'", () => {
+    expect(hitRateTone(null)).toBe("none")
+  })
+
+  test("boundaries are inclusive at the lower edge of each bucket", () => {
+    expect(hitRateTone(1)).toBe("good")
+    expect(hitRateTone(0.7)).toBe("good")
+    expect(hitRateTone(0.69)).toBe("fair")
+    expect(hitRateTone(0.4)).toBe("fair")
+    expect(hitRateTone(0.39)).toBe("poor")
+    expect(hitRateTone(0)).toBe("poor")
+  })
+})
+
+describe("formatHitPercent", () => {
+  test("null renders as N/A", () => {
+    expect(formatHitPercent(null)).toBe("N/A")
+  })
+
+  test("renders an integer percentage of the 0..1 rate", () => {
+    expect(formatHitPercent(0.832)).toBe("83%")
+    expect(formatHitPercent(1)).toBe("100%")
+    expect(formatHitPercent(0)).toBe("0%")
   })
 })
