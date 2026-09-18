@@ -85,17 +85,41 @@ Once installed, the plugin runs automatically:
 The TUI half registers a `Throughput` widget into the `sidebar_content` slot:
 
 ```
-Throughput   42 reqs  $0.1832
+▼ Throughput 42 reqs $0.1832
   Cache 83.2% 1.2M/1.4M
-  deepseek-v4.1-flash  3.1s  58.3/s  4.2s  ↑1.2k ↓892  $0.1832
+  ▼ Models
+  │▶ dsf-v4.1   3.1s 233tk/s $0.1832
+  │▶ mimo-v2.5  2.1s 36tk/s $0.0016
+  ▼ Agents
+  │▶ orchestrator 42r 233tk/s $0.1832
+  │▶ explorer     3r 118tk/s $0.0091
 ```
 
 - **Header** — request count and accumulated cost for the session; clicking it collapses or
   expands the body (expanded by default).
-- **Cache line** — cached prompt tokens over total prompt tokens, colored by hit rate: green at
-  70%+, yellow at 40%+, red below that.
-- **One line per model** — average TTFT, average TPS, average total latency, total input tokens,
-  total output tokens, total cost.
+- **Cache line** — cached prompt tokens over total prompt tokens; the percentage is colored by hit
+   rate: green at 70%+, default text at 40–69%, red only at 0% with multiple requests (a single
+   request with 0% is normal and stays muted).
+- **Models** — collapsible section (open by default), one row per model, highest cost first.  Each
+   model row is itself collapsible (click to toggle, collapsed by default): line 1 shows the fixed
+   10-column name, average TTFT, token speed, and cost; expanding adds a line with the request count
+   (`42r`), token totals (↑input, ↓output, ↓reasoning) and cache hit rate.
+- **Agents** — collapsible section (open by default), one row per agent, highest cost first.  Agent
+   names are padded to a fixed column so counts and speeds line up.  Line 1 shows the name, request
+   count (`42r`), token speed and cost; expanding adds token totals and hit rate.
+- **Colors** — the Models/Agents section labels use the default text color; their child rows are
+   muted grey, except the token speed which is green at ≥ 80 tk/s, yellow at ≥ 30 tk/s, and red
+   below 30 tk/s.
+- **Model names** — the model name column is always exactly 10 display columns (padded with spaces)
+   so rows line up.  Names longer than 10 columns are abbreviated to `<brand><variant>-<version>`,
+   for example `deepseek-v4.1-flash` → `dsf-v4.1` and `glm-5.3-flash` → `glmf-5.3`.  The common
+   models on the OpenCode Go plan have an explicit mapping; anything else is abbreviated by a
+   deterministic fallback, and a name that cannot be abbreviated is clipped to 10 columns.
+- **Narrow sidebars** — each row is an ordered set of fields and the least important ones are
+   dropped whole as the pane narrows.  Token fields (↑in ↓out ↓r) move together rather than being
+   dropped.  At extreme narrow widths (< 24 cols) the panel collapses to a single minimal line per
+   row (speed + cost only).  Token speed and cost are never dropped.
+- **Row cap** — the five costliest models and agents are shown, with a `+N more` line after each.
 - **State** — per session and in memory inside the TUI process. When a session is first displayed
   it is seeded from the SDK session history, and every finished assistant message is deduped by
   `messageID`, so reopening an old session repopulates its totals instead of double counting.

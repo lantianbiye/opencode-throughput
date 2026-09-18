@@ -6,7 +6,7 @@ Bun + TypeScript, no framework. Two independent halves that OpenCode loads from 
 ## Commands
 
 - `bun install` — Bun, not npm. `bun.lock` is present but gitignored.
-- `bun test` — all tests (94 tests, 5 files). There is **no** `test` npm script.
+- `bun test` — all tests (106 tests, 5 files). There is **no** `test` npm script.
 - `bun test test/throughput.test.ts` — single file.
 - `bun run typecheck` — `tsc --noEmit`. Only covers `src/**`; `test/` and `scripts/` are **not** typechecked.
 - `bun run build` — the real build. **Do not** run `bun build src/tui.tsx` directly (see below).

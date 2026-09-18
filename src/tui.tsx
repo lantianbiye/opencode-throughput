@@ -9,16 +9,17 @@ import {
   formatCacheLine,
   hitRateTone,
 } from "./cache-rate.js"
-import {
-  aggregateBy,
-  type GroupTotals,
-  type GroupEntryInput,
-} from "./group-stats.js"
+import { aggregateBy, type GroupEntryInput } from "./group-stats.js"
 import {
   treeSessionIDs,
   type SessionNodeMeta,
 } from "./session-tree.js"
-import { formatModelRow, formatAgentRow, formatChildRow } from "./row-format.js"
+import {
+  formatModelRow,
+  formatAgentRow,
+  type RowSegment,
+  type TpsTone,
+} from "./row-format.js"
 
 // ---------------------------------------------------------------------------
 // Local types
@@ -42,23 +43,6 @@ interface SessionState {
 
 function getModelKey(providerID: string, modelID: string): string {
   return `${providerID}/${modelID}`
-}
-
-function trunc(s: string, max: number): string {
-  return s.length > max ? s.slice(0, max - 1) + "." : s
-}
-
-function sessionLabel(
-  meta: Map<string, SessionNodeMeta>,
-  sid: string,
-  rootID: string
-): string {
-  const node = meta.get(sid)
-  const title = node?.title
-  if (title && title.length > 0) {
-    return trunc(title, sid === rootID ? 13 : 14)
-  }
-  return sid.slice(0, 8) + "\u2026"
 }
 
 // ---------------------------------------------------------------------------
@@ -297,9 +281,26 @@ async function backfillChildren(
 
 function hitRateColor(
   rate: number | null,
-  theme: TuiThemeCurrent
+  theme: TuiThemeCurrent,
+  requestCount: number
 ) {
   const tone = hitRateTone(rate)
+  if (tone === "good") return theme.success
+  // Fair (40-69%): neutral, default text color — informative, not alarming.
+  if (tone === "fair") return theme.text
+  // Poor (<40%): only red for genuinely anomalous cases (multiple requests
+  // with 0% suggests a caching misconfiguration).  A single request with 0%
+  // is normal (cache not yet populated) so stay muted.
+  if (tone === "poor" && rate === 0 && requestCount > 1) return theme.error
+  return theme.textMuted
+}
+
+// ---------------------------------------------------------------------------
+// Token-speed color
+// ---------------------------------------------------------------------------
+
+/** TPS tone -> theme color.  "none" (speed unavailable) stays muted. */
+function tpsColor(tone: TpsTone, theme: TuiThemeCurrent) {
   if (tone === "good") return theme.success
   if (tone === "fair") return theme.warning
   if (tone === "poor") return theme.error
@@ -322,11 +323,10 @@ const MAX_VISIBLE_ROWS = 5
 function ThroughputWidget(props: WidgetProps) {
   const [open, setOpen] = createSignal(true)
   const [openModels, setOpenModels] = createSignal(true)
-  const [openAgents, setOpenAgents] = createSignal(false)
-  const [expandedAgents, setExpandedAgents] = createSignal(
-    new Set<string>()
-  )
-  const [paneWidth, setPaneWidth] = createSignal(44)
+  const [openAgents, setOpenAgents] = createSignal(true)
+  // Expanded child rows, keyed "m:<model>" / "a:<agent>".  Default: collapsed.
+  const [expandedRows, setExpandedRows] = createSignal(new Set<string>())
+  const [paneWidth, setPaneWidth] = createSignal(36)
   const theme = () => props.api.theme.current
 
   // --- D1: measure the widget's own pane width, not the terminal width ---
@@ -353,6 +353,13 @@ function ThroughputWidget(props: WidgetProps) {
         }
       }
       el.on(LayoutEvents.RESIZED, resizeHandler)
+      // Deferred read: width may not be available on first mount before
+      // yoga layout completes.  Try once more after the current event tick.
+      setTimeout(() => {
+        if (typeof el.width === "number" && el.width > 0) {
+          setPaneWidth(el.width)
+        }
+      }, 0)
     } else {
       resizeHandler = null
     }
@@ -411,36 +418,6 @@ function ThroughputWidget(props: WidgetProps) {
     const agentRows = Array.from(byAgent.entries())
       .sort((a, b) => b[1].cost - a[1].cost || a[0].localeCompare(b[0]))
 
-    // Per-agent per-session detail (for expanded agent rows)
-    const agentSessions = new Map<
-      string,
-      Array<{
-        sessionID: string
-        totals: GroupTotals
-        timeCreated: number
-      }>
-    >()
-    for (const agentName of byAgent.keys()) {
-      const agentEntries = entries.filter((e) => e.agent === agentName)
-      const bySession = aggregateBy(agentEntries, (e) => e.sessionID)
-      const sessions = Array.from(bySession.entries())
-        .map(([sid, totals]) => {
-          const earliest = agentEntries
-            .filter((e) => e.sessionID === sid)
-            .reduce(
-              (min, e) => Math.min(min, new Date(e.ts).getTime()),
-              Infinity
-            )
-          return { sessionID: sid, totals, timeCreated: earliest }
-        })
-        .sort(
-          (a, b) =>
-            b.totals.cost - a.totals.cost ||
-            a.timeCreated - b.timeCreated
-        )
-      agentSessions.set(agentName, sessions)
-    }
-
     return {
       totalCount,
       totalCost,
@@ -449,7 +426,6 @@ function ThroughputWidget(props: WidgetProps) {
       inputTokens: totalInput,
       modelRows,
       agentRows,
-      agentSessions,
     }
   })
 
@@ -462,7 +438,7 @@ function ThroughputWidget(props: WidgetProps) {
     })
   )
 
-  const hitRateColorMemo = createMemo(() => hitRateColor(hitRate(), theme()))
+  const hitRateColorMemo = createMemo(() => hitRateColor(hitRate(), theme(), view().totalCount))
 
   const hitRateText = createMemo(() => {
     const v = view()
@@ -473,19 +449,40 @@ function ThroughputWidget(props: WidgetProps) {
     })
   })
 
-  function toggleAgent(name: string) {
-    setExpandedAgents((prev) => {
+  // Split the cache line into three parts so only the percentage carries the
+  // tone color.  The label ("  Cache ") and token counts stay textMuted.
+  const cacheLineParts = createMemo(() => {
+    const text = hitRateText()
+    if (!text) return null
+    const match = text.match(/(\d+\.?\d*%)/)
+    if (!match || match.index === undefined) return { prefix: text, pct: "", suffix: "" }
+    return {
+      prefix: text.slice(0, match.index),
+      pct: match[1],
+      suffix: text.slice(match.index + match[1].length),
+    }
+  })
+
+  function toggleRow(key: string) {
+    setExpandedRows((prev) => {
       const next = new Set(prev)
-      if (next.has(name)) next.delete(name)
-      else next.add(name)
+      if (next.has(key)) next.delete(key)
+      else next.add(key)
       return next
     })
   }
 
-  // Width passed to row formatters.
-  // Model row: full pane width, formatter owns 2-space indent.
-  // Child row: full pane width, formatter owns 4-space indent and "*".
-  // Agent row: (paneWidth - 4), formatter owns the caller-supplied 4-char prefix.
+  // Row prefix carries the tree bar and the collapse marker.
+  function rowPrefix(expanded: boolean): string {
+    return "  \u2502" + (expanded ? "\u25bc" : "\u25b6") + " "
+  }
+
+  function segmentColor(seg: RowSegment): any {
+    return seg.tps ? tpsColor(seg.tps, theme()) : theme().textMuted
+  }
+
+  // Width passed to row formatters.  The caller owns the row prefix
+  // ("  │▼ " / "  │▶ "), so the budget is the full pane width.
   const w = paneWidth
 
   return (
@@ -520,8 +517,12 @@ function ThroughputWidget(props: WidgetProps) {
       {/* Body -- only when expanded and data exists */}
       <Show when={open() && view().totalCount > 0}>
         {/* Session-wide cache hit rate */}
-        <Show when={hitRateText()}>
-          <text fg={hitRateColorMemo()}>{hitRateText()}</text>
+        <Show when={cacheLineParts()}>
+          <box flexDirection="row">
+            <text fg={theme().textMuted}>{cacheLineParts()!.prefix}</text>
+            <text fg={hitRateColorMemo()}>{cacheLineParts()!.pct}</text>
+            <text fg={theme().textMuted}>{cacheLineParts()!.suffix}</text>
+          </box>
         </Show>
 
         {/* Models sub-section */}
@@ -530,17 +531,33 @@ function ThroughputWidget(props: WidgetProps) {
           gap={1}
           onMouseDown={() => setOpenModels((x) => !x)}
         >
-          <text fg={theme().textMuted}>
+          <text fg={theme().text}>
             {"  " + (openModels() ? "\u25bc " : "\u25b6 ") + "Models"}
           </text>
         </box>
         <Show when={openModels()}>
           <For each={view().modelRows.slice(0, MAX_VISIBLE_ROWS)}>
-            {([key, totals]) => (
-              <text fg={theme().textMuted}>
-                {formatModelRow(key, totals, w())}
-              </text>
-            )}
+            {([key, totals]) => {
+              const rowKey = "m:" + key
+              const isExpanded = () => expandedRows().has(rowKey)
+              const lines = () =>
+                formatModelRow(rowPrefix(isExpanded()), key, totals, w())
+              return (
+                <box>
+                  <box
+                    flexDirection="row"
+                    onMouseDown={() => toggleRow(rowKey)}
+                  >
+                    {lines().line1.map((seg) => (
+                      <text fg={segmentColor(seg)}>{seg.text}</text>
+                    ))}
+                  </box>
+                  <Show when={isExpanded() && lines().line2}>
+                    <text fg={theme().textMuted}>{lines().line2!}</text>
+                  </Show>
+                </box>
+              )
+            }}
           </For>
           <Show
             when={
@@ -561,7 +578,7 @@ function ThroughputWidget(props: WidgetProps) {
           gap={1}
           onMouseDown={() => setOpenAgents((x) => !x)}
         >
-          <text fg={theme().textMuted}>
+          <text fg={theme().text}>
             {"  " + (openAgents() ? "\u25bc " : "\u25b6 ") + "Agents"}
           </text>
         </box>
@@ -570,82 +587,28 @@ function ThroughputWidget(props: WidgetProps) {
             each={view().agentRows.slice(0, MAX_VISIBLE_ROWS)}
           >
             {([agentName, totals]) => {
-              const isExpanded = () =>
-                expandedAgents().has(agentName)
-              const sessions = () =>
-                view().agentSessions.get(agentName) ?? []
-              const sessionCount = () => sessions().length
-              const expandable = () => sessionCount() > 1
-              const childSlice = () =>
-                sessions().slice(0, MAX_VISIBLE_ROWS)
-
-              // Agent row prefix: 4 chars ("  ▼ " / "  ▶ " / "    ")
-              const prefix = () =>
-                expandable()
-                  ? isExpanded()
-                    ? "  \u25bc "
-                    : "  \u25b6 "
-                  : "    "
-
+              const rowKey = "a:" + agentName
+              const isExpanded = () => expandedRows().has(rowKey)
+              const lines = () =>
+                formatAgentRow(
+                  rowPrefix(isExpanded()),
+                  agentName,
+                  totals.count,
+                  totals,
+                  w()
+                )
               return (
                 <box>
-                  {/* Agent row (clickable if expandable) */}
                   <box
                     flexDirection="row"
-                    onMouseDown={() =>
-                      expandable() && toggleAgent(agentName)
-                    }
+                    onMouseDown={() => toggleRow(rowKey)}
                   >
-                    <text fg={theme().text}>
-                      {formatAgentRow(
-                        prefix(),
-                        agentName,
-                        totals.count,
-                        totals,
-                        w()
-                      )}
-                    </text>
+                    {lines().line1.map((seg) => (
+                      <text fg={segmentColor(seg)}>{seg.text}</text>
+                    ))}
                   </box>
-                  {/* Child sessions */}
-                  <Show when={isExpanded()}>
-                    <For each={childSlice()}>
-                      {(child) => {
-                        const isCurrentSession = () =>
-                          child.sessionID === props.sessionId()
-                        return (
-                          <text
-                            fg={
-                              isCurrentSession()
-                                ? theme().text
-                                : theme().textMuted
-                            }
-                          >
-                            {formatChildRow(
-                              sessionLabel(
-                                sessionMeta,
-                                child.sessionID,
-                                props.sessionId()
-                              ),
-                              child.totals,
-                              isCurrentSession(),
-                              w()
-                            )}
-                          </text>
-                        )
-                      }}
-                    </For>
-                    <Show
-                      when={
-                        sessionCount() > MAX_VISIBLE_ROWS
-                      }
-                    >
-                      <text fg={theme().textMuted}>
-                        {"    +" +
-                          (sessionCount() -
-                            MAX_VISIBLE_ROWS) +
-                          " more sessions"}
-                      </text>
-                    </Show>
+                  <Show when={isExpanded() && lines().line2}>
+                    <text fg={theme().textMuted}>{lines().line2!}</text>
                   </Show>
                 </box>
               )

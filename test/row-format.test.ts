@@ -1,155 +1,309 @@
 import { describe, test, expect } from "bun:test"
-import { formatModelRow, formatAgentRow, formatChildRow } from "../src/row-format.js"
+import {
+  formatModelRow,
+  formatAgentRow,
+  displayWidth,
+  modelDisplayName,
+  tpsTone,
+  type RowLines,
+} from "../src/row-format.js"
 import type { GroupTotals } from "../src/group-stats.js"
 
 function totals(overrides: Partial<GroupTotals> = {}): GroupTotals {
   return {
-    count: 0,
-    ttftSum: 0,
-    tpsSum: 0,
-    latencySum: 0,
-    input: 0,
-    output: 0,
-    reasoning: 0,
-    read: 0,
-    write: 0,
-    cost: 0,
+    count: 0, ttftSum: 0, tpsSum: 0, latencySum: 0,
+    input: 0, output: 0, reasoning: 0,
+    read: 0, write: 0, cost: 0,
     ...overrides,
   }
 }
 
 const MODEL_KEY = "anthropic/claude-sonnet-4-20250514"
 
-// avg TTFT 3.4s, avg TPS 45.0/s. Deliberately a set with no reasoning.
 const exact = totals({
-  count: 2,
-  ttftSum: 6800,
-  tpsSum: 90,
-  latencySum: 8000,
-  input: 12,
-  output: 3,
-  reasoning: 0,
-  read: 60,
-  write: 0,
-  cost: 0.01,
+  count: 2, ttftSum: 6800, tpsSum: 90, latencySum: 8000,
+  input: 12, output: 3, reasoning: 0,
+  read: 60, write: 0, cost: 0.01,
 })
 
-// TTFT and latency both render as "3.4s" -- the substring-replacement trap.
 const sameMs = totals({
-  count: 3,
-  ttftSum: 10200,
-  tpsSum: 135,
-  latencySum: 10200,
-  input: 20000,
-  output: 8200,
-  reasoning: 1200,
-  read: 100000,
-  write: 0,
-  cost: 0.0421,
+  count: 3, ttftSum: 10200, tpsSum: 135, latencySum: 10200,
+  input: 20000, output: 8200, reasoning: 1200,
+  read: 100000, write: 0, cost: 0.0421,
 })
 
-// Same trap, but compact enough that the degraded form still reads well.
 const compact = totals({
-  count: 1,
-  ttftSum: 3400,
-  tpsSum: 45,
-  latencySum: 4000,
-  input: 12,
-  output: 3,
-  reasoning: 120,
-  read: 60,
-  write: 0,
-  cost: 0.01,
+  count: 1, ttftSum: 3400, tpsSum: 45, latencySum: 4000,
+  input: 12, output: 3, reasoning: 120,
+  read: 60, write: 0, cost: 0.01,
 })
 
 const noReason = totals({
-  count: 2,
-  ttftSum: 4000,
-  tpsSum: 90,
-  latencySum: 8000,
-  input: 12000,
-  output: 5000,
-  reasoning: 0,
-  read: 50000,
-  write: 0,
-  cost: 0.0105,
+  count: 2, ttftSum: 4000, tpsSum: 90, latencySum: 8000,
+  input: 12000, output: 5000, reasoning: 0,
+  read: 50000, write: 0, cost: 0.0105,
 })
 
 const bigTokens = totals({
-  count: 2,
-  ttftSum: 9000,
-  tpsSum: 100,
-  latencySum: 9000,
-  input: 1234567,
-  output: 9876543,
-  reasoning: 0,
-  read: 0,
-  write: 1234567,
-  cost: 1234.5678,
+  count: 2, ttftSum: 9000, tpsSum: 100, latencySum: 9000,
+  input: 1234567, output: 9876543, reasoning: 0,
+  read: 0, write: 1234567, cost: 1234.5678,
 })
 
-// Agent/child drop-order set: every droppable field is present and the numbers
-// are big enough that field drops actually happen at sidebar widths.
 const dropSet = totals({
-  count: 4,
-  ttftSum: 13600,
-  tpsSum: 180,
-  latencySum: 16000,
-  input: 20000,
-  output: 8200,
-  reasoning: 1200,
-  read: 100000,
-  write: 0,
-  cost: 0.0421,
+  count: 4, ttftSum: 13600, tpsSum: 180, latencySum: 16000,
+  input: 20000, output: 8200, reasoning: 1200,
+  read: 100000, write: 0, cost: 0.0421,
 })
 
-// Small-token set used to pin the gradual-degradation policy: the token fields
-// are narrow enough that timing fields survive down to ~33 columns.
-const report = totals({
-  count: 2,
-  ttftSum: 6800,
-  tpsSum: 90,
-  latencySum: 6800,
-  input: 5,
-  output: 3,
-  reasoning: 120,
-  read: 15,
-  write: 0,
-  cost: 0.01,
+const deepseek = totals({
+  count: 1, tpsSum: 95, latencySum: 250, ttftSum: 120,
+  input: 21300, output: 260, reasoning: 49,
+  read: 0, write: 0, cost: 0.0034,
 })
 
-const REPRESENTATIVE: GroupTotals[] = [
-  sameMs,
-  noReason,
-  exact,
-  totals(),
-  bigTokens,
-]
+const REPRESENTATIVE: GroupTotals[] = [sameMs, noReason, exact, totals(), bigTokens]
 
-function allRows(t: GroupTotals, width: number): string[] {
+// Caller-supplied row prefixes, mirroring the TUI's collapse markers.
+const PREFIX = "  \u2502\u25bc " // "  │▼ "
+const COLLAPSED_PREFIX = "  \u2502\u25b6 " // "  │▶ "
+
+/** Flatten a formatted row into its plain text lines (line 2 omitted when null). */
+function lineTexts(r: RowLines): string[] {
+  const lines = [r.line1.map((s) => s.text).join("")]
+  if (r.line2 !== null) lines.push(r.line2)
+  return lines
+}
+
+function allRows(t: GroupTotals, width: number): RowLines[] {
   return [
-    formatModelRow(MODEL_KEY, t, width),
-    formatModelRow("openai/gpt-5", t, width),
-    formatAgentRow("  \u25bc ", "orchestrator", 2, t, width),
-    formatAgentRow("  \u25b6 ", "build", 7, t, width),
-    formatAgentRow("    ", "plan", 1, t, width),
-    formatChildRow("session-label-xyz", t, false, width),
-    formatChildRow("session-label-xyz", t, true, width),
+    formatModelRow(PREFIX, MODEL_KEY, t, width),
+    formatModelRow(PREFIX, "openai/gpt-5", t, width),
+    formatAgentRow(PREFIX, "orchestrator", 2, t, width),
+    formatAgentRow(COLLAPSED_PREFIX, "build", 7, t, width),
+    formatAgentRow(PREFIX, "plan", 1, t, width),
   ]
 }
 
-function countOccurrences(s: string, sub: string): number {
-  return s.split(sub).length - 1
+// ---------------------------------------------------------------------------
+// displayWidth
+// ---------------------------------------------------------------------------
+
+describe("displayWidth", () => {
+  test("ASCII is single-width", () => {
+    expect(displayWidth("hello")).toBe(5)
+    expect(displayWidth("")).toBe(0)
+  })
+
+  test("↑ and ↓ are counted as double-width", () => {
+    expect(displayWidth("\u2191")).toBe(2)
+    expect(displayWidth("\u2193")).toBe(2)
+    expect(displayWidth("a\u2191b")).toBe(4)
+  })
+
+  test("CJK fullwidth characters are double-width", () => {
+    expect(displayWidth("\u4E16")).toBe(2)
+    expect(displayWidth("\u3042")).toBe(2)
+    expect(displayWidth("\uAC00")).toBe(2)
+    expect(displayWidth("\uFF21")).toBe(2)
+    expect(displayWidth("abc\u4E16def")).toBe(8)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// modelDisplayName
+// ---------------------------------------------------------------------------
+
+// Mirror of the production override table. Every entry must map to exactly this
+// display string and occupy exactly 10 padded display columns.
+const OVERRIDE_CASES: Record<string, string> = {
+  "gpt-5.6-luna": "gptl-5.6",
+  "glm-5.3-flash": "glmf-5.3",
+  "kimi-k2.7-code": "kimic-k2.7",
+  "longcat-2.0": "lc-2.0",
+  "deepseek-v4.1-flash": "dsf-v4.1",
+  "deepseek-v4-pro": "dsp-v4",
+  "deepseek-v4-flash": "dsf-v4",
+  "deepseek-flash": "dsf",
+  "deepseek-v4-flash-vision-exp": "dsfve-v4",
+  "mimo-v2.5-pro": "mmp-v2.5",
+  "mimo-v2-pro": "mmp-v2",
+  "mimo-v2-omni": "mmo-v2",
+  "minimax-m2.7": "mmx-m2.7",
+  "minimax-m2.5": "mmx-m2.5",
+  "muse-spark-1.3-contributor": "msp-1.3",
+  "muse-spark-1.2-contributor": "msp-1.2",
+  "qwen3.8-max": "qwm-3.8",
+  "qwen3.8-flash": "qwf-3.8",
+  "qwen3.7-max": "qwm-3.7",
+  "qwen3.7-plus": "qwpl-3.7",
+  "qwen3.6-plus": "qwpl-3.6",
+  "qwen3.5-plus": "qwpl-3.5",
+  "hy4-preview": "hypv-4",
+  "hy3-preview": "hypv-3",
+  "union-alpha": "union-a",
+  "ox-alpha-free": "ox-a",
 }
 
+// Ids that must pass through unchanged (they are already <= 10 columns).
+const PASS_THROUGH_CASES = [
+  "grok-4.6", "grok-4.5",
+  "glm-5.3", "glm-5.2", "glm-5.1", "glm-5",
+  "kimi-k3", "kimi-k2.6", "kimi-k2.5",
+  "mimo-v2.5", "minimax-m3",
+  "hy3", "omen-alpha",
+]
+
+describe("modelDisplayName", () => {
+  test("every override maps to its exact expected display string", () => {
+    for (const [raw, expected] of Object.entries(OVERRIDE_CASES)) {
+      expect(modelDisplayName(raw).trimEnd()).toBe(expected)
+    }
+  })
+
+  test("every override result is <= 10 display columns (padded to 10)", () => {
+    for (const raw of Object.keys(OVERRIDE_CASES)) {
+      expect(displayWidth(modelDisplayName(raw))).toBe(10)
+    }
+  })
+
+  test("provider prefixes use the last path segment", () => {
+    expect(modelDisplayName("opencode-go/deepseek-v4.1-flash").trimEnd()).toBe("dsf-v4.1")
+    expect(modelDisplayName("opencode/glm-5.3-flash").trimEnd()).toBe("glmf-5.3")
+  })
+
+  test("a short name pads to exactly 10 columns", () => {
+    const out = modelDisplayName("grok-4.5")
+    expect(out.trimEnd()).toBe("grok-4.5")
+    expect(displayWidth(out)).toBe(10)
+  })
+
+  test("pass-through ids stay unchanged", () => {
+    for (const id of PASS_THROUGH_CASES) {
+      const out = modelDisplayName(id)
+      expect(out.trimEnd()).toBe(id)
+      expect(displayWidth(out)).toBe(10)
+    }
+  })
+
+  test("long unknown ids fall back to a non-empty <= 10 column name", () => {
+    for (const id of ["somebrand-9.9-turbo-ultra", "another-very-long-unknown-model-3.0"]) {
+      const out = modelDisplayName(id)
+      expect(out.length).toBeGreaterThan(0)
+      expect(displayWidth(out)).toBe(10)
+    }
+  })
+
+  test("a bare id with no slash works", () => {
+    expect(displayWidth(modelDisplayName("somebrand-9.9-turbo-ultra"))).toBe(10)
+    expect(modelDisplayName("deepseek-v4.1-flash").trimEnd()).toBe("dsf-v4.1")
+  })
+
+  test("model rows fit at 24/28/34/37/44/60 for varied ids", () => {
+    const ids = [
+      "mimo-v2.5",
+      "deepseek-v4.1-flash",
+      "glm-5.3-flash",
+      "minimax-m2.7",
+      "qwen3.7-plus",
+      "hy3",
+      "somebrand-9.9-turbo-ultra",
+    ]
+    for (const w of [24, 28, 34, 37, 44, 60]) {
+      for (const id of ids) {
+        for (const t of REPRESENTATIVE) {
+          for (const line of lineTexts(formatModelRow(PREFIX, id, t, w))) {
+            expect(displayWidth(line)).toBeLessThanOrEqual(w)
+          }
+        }
+      }
+    }
+  })
+})
+
+// ---------------------------------------------------------------------------
+// tpsTone
+// ---------------------------------------------------------------------------
+
+describe("tpsTone", () => {
+  test("thresholds: >=80 good, >=30 fair, <30 poor", () => {
+    expect(tpsTone(120)).toBe("good")
+    expect(tpsTone(80)).toBe("good")
+    expect(tpsTone(79.9)).toBe("fair")
+    expect(tpsTone(30)).toBe("fair")
+    expect(tpsTone(29.9)).toBe("poor")
+    expect(tpsTone(0)).toBe("poor")
+  })
+
+  test("null / non-finite -> none (muted)", () => {
+    expect(tpsTone(null)).toBe("none")
+    expect(tpsTone(Infinity)).toBe("none")
+    expect(tpsTone(NaN)).toBe("none")
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Return shape: RowLines with a segmented line 1 and optional line 2
+// ---------------------------------------------------------------------------
+
+describe("return shape", () => {
+  test("formatModelRow returns RowLines with segments", () => {
+    const r = formatModelRow(PREFIX, MODEL_KEY, sameMs, 44)
+    expect(Array.isArray(r.line1)).toBe(true)
+    for (const seg of r.line1) expect(typeof seg.text).toBe("string")
+    expect(r.line2 === null || typeof r.line2 === "string").toBe(true)
+  })
+
+  test("formatAgentRow returns RowLines with segments", () => {
+    const r = formatAgentRow(PREFIX, "orchestrator", 2, sameMs, 44)
+    expect(Array.isArray(r.line1)).toBe(true)
+    for (const seg of r.line1) expect(typeof seg.text).toBe("string")
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Speed segment carries the tone; every other segment stays muted
+// ---------------------------------------------------------------------------
+
+describe("speed segment tone", () => {
+  test("only the speed segment carries a tps tone", () => {
+    const r = formatModelRow(PREFIX, MODEL_KEY, sameMs, 44)
+    const tps = r.line1.filter((s) => s.tps !== undefined)
+    expect(tps.length).toBe(1)
+    expect(tps[0].text).toBe("45tk/s")
+    expect(tps[0].tps).toBe("fair")
+  })
+
+  test("fast speed is good, slow speed is poor", () => {
+    const fast = formatModelRow(PREFIX, "x/m", totals({ count: 1, tpsSum: 120, cost: 0.01 }), 44)
+    const slow = formatModelRow(PREFIX, "x/m", totals({ count: 1, tpsSum: 12, cost: 0.01 }), 44)
+    expect(fast.line1.find((s) => s.tps)?.tps).toBe("good")
+    expect(slow.line1.find((s) => s.tps)?.tps).toBe("poor")
+  })
+
+  test("a zero average speed is poor (red), not missing", () => {
+    const r = formatModelRow(PREFIX, "x/m", totals({ count: 1, tpsSum: 0, cost: 0.01 }), 44)
+    const tps = r.line1.find((s) => s.tps !== undefined)
+    expect(tps?.text).toBe("0tk/s")
+    expect(tps?.tps).toBe("poor")
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Width guarantee: every line fits
+// ---------------------------------------------------------------------------
+
 describe("width guarantee", () => {
-  test("every row fits widths 12..120 for every representative totals", () => {
+  test("every line fits display-width 12..120 for every representative totals", () => {
     const violations: string[] = []
     for (let width = 12; width <= 120; width++) {
       for (const t of REPRESENTATIVE) {
         for (const row of allRows(t, width)) {
-          if (row.length > width) {
-            violations.push(`w=${width} len=${row.length} |${row}|`)
+          for (const line of lineTexts(row)) {
+            const dw = displayWidth(line)
+            if (dw > width) {
+              violations.push(`w=${width} dw=${dw} |${line}|`)
+            }
           }
         }
       }
@@ -157,13 +311,15 @@ describe("width guarantee", () => {
     expect(violations).toEqual([])
   })
 
-  test("widths below 12 hard-truncate instead of overflowing or slicing negatively", () => {
+  test("widths below 12 hard-truncate instead of overflowing", () => {
     const violations: string[] = []
     for (let width = 0; width < 12; width++) {
       for (const t of REPRESENTATIVE) {
         for (const row of allRows(t, width)) {
-          if (row.length > width) {
-            violations.push(`w=${width} len=${row.length} |${row}|`)
+          for (const line of lineTexts(row)) {
+            if (line.length > width) {
+              violations.push(`w=${width} len=${line.length} |${line}|`)
+            }
           }
         }
       }
@@ -171,24 +327,14 @@ describe("width guarantee", () => {
     expect(violations).toEqual([])
   })
 
-  test("agent/child never truncate hr or cost while a droppable field remains", () => {
+  test("no row exceeds 2 lines", () => {
     const violations: string[] = []
-    // 19 is the first width where the biggest representative cost ("$1234.5678")
-    // plus a 1-char name fits; below that the final clamp is the only (allowed)
-    // chopping case.
-    for (let width = 19; width <= 120; width++) {
+    for (let width = 12; width <= 120; width++) {
       for (const t of REPRESENTATIVE) {
-        const rows = [
-          formatAgentRow("  \u25bc ", "orchestrator", 4, t, width),
-          formatAgentRow("  \u25b6 ", "build", 7, t, width),
-          formatAgentRow("    ", "plan", 1, t, width),
-          formatChildRow("session-label-xyz", t, false, width),
-          formatChildRow("session-label-xyz", t, true, width),
-        ]
-        for (const row of rows) {
-          const costIntact = /\$\d+\.\d{4}$/.test(row)
-          const hrIntact = row.includes("%") ? /\d+%/.test(row) : row.includes("N/A")
-          if (!costIntact || !hrIntact) violations.push(`w=${width} |${row}|`)
+        for (const row of allRows(t, width)) {
+          if (lineTexts(row).length > 2) {
+            violations.push(`w=${width} ${lineTexts(row).length} lines`)
+          }
         }
       }
     }
@@ -196,312 +342,218 @@ describe("width guarantee", () => {
   })
 })
 
-describe("formatModelRow", () => {
-  test("takes the short model name from the last path segment", () => {
-    expect(formatModelRow("openai/gpt-5", exact, 45)).toContain("gpt-5")
-    expect(formatModelRow("anthropic/claude-sonnet-4-20250514", exact, 45)).not.toContain("anthropic")
+// ---------------------------------------------------------------------------
+// No lone ↓ without ↑
+// ---------------------------------------------------------------------------
+
+describe("token field grouping", () => {
+  test("lone ↓ without ↑ is never produced", () => {
+    const violations: string[] = []
+    for (let width = 12; width <= 120; width++) {
+      for (const t of REPRESENTATIVE) {
+        for (const row of allRows(t, width)) {
+          for (const line of lineTexts(row)) {
+            const hasDown = line.includes("\u2193") && !line.includes("\u2193r")
+            const hasUp = line.includes("\u2191")
+            if (hasDown && !hasUp) {
+              violations.push(`w=${width} lone ↓ in |${line}|`)
+            }
+          }
+        }
+      }
+    }
+    expect(violations).toEqual([])
   })
 
-  test("full row carries ttft, tps, count, latency, tokens, hit rate and cost", () => {
-    const row = formatModelRow(MODEL_KEY, sameMs, 80)
-    expect(row).toBe(
-      "  claude-sonnet-4-20250514 3.4s 45.0/s 3 3.4s \u219120.0k \u21938.2k \u2193r1.2k 83% $0.0421"
-    )
-  })
-
-  test("drops lat \u2192 count \u2192 ttft \u2192 tps as the width shrinks (reasoning is permanent)", () => {
-    // Full row has all fields including count=3 and reason
-    const full = formatModelRow(MODEL_KEY, sameMs, 80)
-    expect(full).toContain("\u2193r1.2k")
-    expect(full).toContain("45.0/s")
-    expect(full).toContain(" 3 ")
-
-    // lat gone, everything else still present
-    const noLat = formatModelRow(MODEL_KEY, sameMs, 58)
-    expect(noLat).toContain("45.0/s")
-    expect(noLat).toContain("\u2193r1.2k")
-    expect(noLat).toContain("3 ")
-
-    // count gone (lat+count), tps still present
-    const noCount = formatModelRow(MODEL_KEY, sameMs, 51)
-    expect(noCount).toContain("45.0/s")
-    expect(noCount).toContain("\u2193r1.2k")
-    expect(noCount).not.toMatch(/ 3 /)
-
-    // ttft gone (lat+count+ttft), tps still present
-    const noTtft = formatModelRow(MODEL_KEY, sameMs, 49)
-    expect(noTtft).toContain("45.0/s")
-    expect(noTtft).not.toContain("3.4s")
-    expect(noTtft).toContain("\u2193r1.2k")
-
-    // tps gone (all droppable fields gone)
-    const noTps = formatModelRow(MODEL_KEY, sameMs, 48)
-    expect(noTps).not.toContain("/s")
-    expect(noTps).not.toContain("3.4s")
-    expect(noTps).toContain("\u2193r1.2k")
-  })
-
-  test("drops latency by field identity, not by substring replacement", () => {
-    // ttft and lat both render as "3.4s". The old `row.replace(" 3.4s", "")`
-    // removed the FIRST occurrence -- the TTFT -- and left the latency. At w=51
-    // lat+count+ttft are all dropped, leaving tps as the first timing field.
-    const row = formatModelRow(MODEL_KEY, sameMs, 51)
-    expect(row).toBe("  claude-so. 45.0/s \u219120.0k \u21938.2k \u2193r1.2k 83% $0.0421")
-    expect(row).toContain("45.0/s")
-    expect(row).not.toContain("3.4s")
-  })
-
-  test("reaches the no-timing end state only after the drop chain is exhausted", () => {
-    const row = formatModelRow(MODEL_KEY, compact, 28)
-    expect(row).toBe("  . \u219112 \u21933 \u2193r120 83% $0.0100")
-    expect(row).toContain("\u2193r120")
-    expect(row).not.toContain("/s")
-    expect(row).not.toContain("3.4s")
-  })
-
-  test("reaches the no-timing compact form at narrow widths", () => {
-    const row = formatModelRow(MODEL_KEY, report, 33)
-    expect(row).toBe("  claude. \u21915 \u21933 \u2193r120 75% $0.0100")
-    expect(row).not.toContain("/s")
-    expect(row).not.toContain("3.4s")
-  })
-
-  test("a group with no prompt tokens renders N/A, never NaN", () => {
-    const row = formatModelRow("openai/gpt-5", totals(), 45)
-    expect(row).toContain("N/A")
-    expect(row).not.toContain("NaN")
-  })
-
-  test("exact strings at 45 / 35 / 28 columns", () => {
-    expect(formatModelRow(MODEL_KEY, exact, 45)).toBe(
-      "  claude-. 3.4s 45.0/s \u219112 \u21933 \u2193r0 83% $0.0100"
-    )
-    expect(formatModelRow(MODEL_KEY, exact, 35)).toBe(
-      "  claude-so. \u219112 \u21933 \u2193r0 83% $0.0100"
-    )
-    expect(formatModelRow(MODEL_KEY, exact, 28)).toBe(
-      "  cl. \u219112 \u21933 \u2193r0 83% $0.0100"
-    )
+  test("↓r without ↓ never appears", () => {
+    const violations: string[] = []
+    for (let width = 12; width <= 120; width++) {
+      for (const t of REPRESENTATIVE) {
+        for (const row of allRows(t, width)) {
+          for (const line of lineTexts(row)) {
+            const hasReason = line.includes("\u2193r")
+            const hasDown = line.includes("\u2193")
+            if (hasReason && !hasDown) {
+              violations.push(`w=${width} ↓r without ↓ in |${line}|`)
+            }
+          }
+        }
+      }
+    }
+    expect(violations).toEqual([])
   })
 })
 
-describe("formatAgentRow", () => {
-  test("truncates the agent name to 10 characters", () => {
-    expect(formatAgentRow("  \u25bc ", "orchestrator", 2, exact, 45)).toBe(
-      "  \u25bc orchestra. 2 \u219112 \u21933 83% $0.0100"
-    )
+// ---------------------------------------------------------------------------
+// Truncation uses … not .
+// ---------------------------------------------------------------------------
+
+describe("truncation", () => {
+  test("clamped model rows end with … (U+2026), not dot", () => {
+    // At very narrow widths the whole line is clipped by clampRow — the
+    // ellipsis must still be U+2026.
+    const row = formatModelRow(PREFIX, MODEL_KEY, exact, 14)
+    const joined = lineTexts(row).join(" ")
+    expect(joined).toContain("\u2026")
+    expect(joined).not.toMatch(/\w\.\s/)
   })
+})
 
-  test("keeps all three caller prefixes", () => {
-    expect(formatAgentRow("  \u25bc ", "build", 2, exact, 45)).toContain("  \u25bc ")
-    expect(formatAgentRow("  \u25b6 ", "build", 2, exact, 45)).toContain("  \u25b6 ")
-    expect(formatAgentRow("    ", "build", 2, exact, 45)).toContain("    ")
-  })
+// ---------------------------------------------------------------------------
+// Two-line behavior
+// ---------------------------------------------------------------------------
 
-  test("drops reason \u2192 count \u2192 \u2193out \u2192 \u2191in as the width shrinks", () => {
-    const wide = formatAgentRow("  \u25bc ", "orchestrator", 4, dropSet, 60)
-    expect(wide).toBe(
-      "  \u25bc orchestra. 4 \u219120.0k \u21938.2k \u2193r1.2k 83% $0.0421"
-    )
-
-    // reason gone
-    const noReason = formatAgentRow("  \u25bc ", "orchestrator", 4, dropSet, 45)
-    expect(noReason).not.toContain("\u2193r")
-    expect(noReason).toContain("4")
-    expect(noReason).toContain("\u219120.0k")
-    expect(noReason).toContain("\u21938.2k")
-
-    // count gone
-    const noCount = formatAgentRow("  \u25bc ", "orchestrator", 4, dropSet, 38)
-    expect(noCount).not.toContain("\u2193r")
-    expect(noCount).not.toMatch(/ 4 /)
-    expect(noCount).toContain("\u219120.0k")
-    expect(noCount).toContain("\u21938.2k")
-
-    // out gone
-    const noOut = formatAgentRow("  \u25bc ", "orchestrator", 4, dropSet, 36)
-    expect(noOut).not.toContain("\u21938.2k")
-    expect(noOut).toContain("\u219120.0k")
-
-    // in survives at 35 columns -- a gradual drop beats a cliff-edge compact
-    const keepsIn = formatAgentRow("  \u25bc ", "orchestrator", 4, dropSet, 35)
-    expect(keepsIn).toBe("  \u25bc orchestra. \u219120.0k 83% $0.0421")
-    expect(keepsIn).toContain("\u219120.0k")
-    expect(keepsIn).not.toContain("\u21938.2k")
-
-    // in drops only when it genuinely cannot fit
-    const degenerate = formatAgentRow("  \u25bc ", "orchestrator", 4, dropSet, 30)
-    expect(degenerate).not.toContain("\u2191")
-    expect(degenerate).not.toContain("\u2193")
-
-    for (const row of [wide, noReason, noCount, noOut, keepsIn, degenerate]) {
-      expect(row).toContain("83%")
-      expect(row).toContain("$0.0421")
+describe("two-line behavior", () => {
+  test("expanded model rows always carry a detail line", () => {
+    for (const w of [24, 28, 34, 37, 44, 60, 120]) {
+      const r = formatModelRow(PREFIX, MODEL_KEY, sameMs, w)
+      expect(r.line2).not.toBeNull()
+      expect(r.line2!.startsWith("  \u2502   ")).toBe(true)
     }
   })
 
-  test("end state keeps only name, hr and cost once every droppable field is gone", () => {
-    // width 35 still holds ↑in; the degenerate form must not appear yet.
-    expect(formatAgentRow("  \u25bc ", "orchestrator", 4, dropSet, 35)).toBe(
-      "  \u25bc orchestra. \u219120.0k 83% $0.0421"
-    )
-    // width 30 cannot hold ↑in alongside hr+cost, so it drops.
-    expect(formatAgentRow("  \u25bc ", "orchestrator", 4, dropSet, 30)).toBe(
-      "  \u25bc orchestra. 83% $0.0421"
-    )
+  test("model request count starts line 2 with an r suffix", () => {
+    const r = formatModelRow(PREFIX, MODEL_KEY, sameMs, 44)
+    expect(r.line2!).toContain("\u2502   3r ")
   })
 
-  test("exact strings at 45 / 35 / 28 / 24 columns keep hr and cost intact", () => {
-    expect(formatAgentRow("  \u25bc ", "orchestrator", 2, exact, 45)).toBe(
-      "  \u25bc orchestra. 2 \u219112 \u21933 83% $0.0100"
-    )
-    expect(formatAgentRow("  \u25bc ", "orchestrator", 2, exact, 35)).toBe(
-      "  \u25bc orchestra. 2 \u219112 \u21933 83% $0.0100"
-    )
-    expect(formatAgentRow("  \u25bc ", "orchestrator", 2, exact, 28)).toBe(
-      "  \u25bc orchest. \u219112 83% $0.0100"
-    )
-    expect(formatAgentRow("  \u25bc ", "orchestrator", 2, exact, 24)).toBe(
-      "  \u25bc orchest. 83% $0.0100"
-    )
+  test("agent request count stays on line 1 with an r suffix", () => {
+    const r = formatAgentRow(PREFIX, "orchestrator", 3, sameMs, 44)
+    expect(lineTexts(r)[0]).toContain("orchestrator 3r")
+    expect(r.line2).not.toContain("3r")
   })
 
-  test("keeps \u2191in at a 35-column pane instead of the degenerate form", () => {
-    expect(formatAgentRow("  \u25bc ", "orchestrator", 4, report, 35)).toBe(
-      "  \u25bc orchestra. 4 \u21915 \u21933 75% $0.0100"
-    )
+  test("agent line 2 carries tokens and hit rate", () => {
+    const r = formatAgentRow(PREFIX, "orchestrator", 1, deepseek, 44)
+    expect(r.line2).toContain("\u219121.3k")
+    expect(r.line2).toContain("0%")
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Continuation prefix
+// ---------------------------------------------------------------------------
+
+describe("continuation line prefix", () => {
+  test("line 2 starts with '  │   ' (bar + 3 spaces)", () => {
+    const r = formatModelRow(PREFIX, MODEL_KEY, sameMs, 44)
+    expect(r.line2!.startsWith("  \u2502   ")).toBe(true)
   })
 
-  test("never chops hr or cost mid-token at narrow widths", () => {
-    const rows = [28, 35].flatMap((width) => [
-      formatAgentRow("  \u25bc ", "orchestrator", 4, dropSet, width),
-      formatAgentRow("  \u25bc ", "orchestrator", 2, exact, width),
-    ])
-    for (const row of rows) {
-      expect(row).not.toMatch(/\$0\.0\.$/)
-      expect(row).not.toMatch(/ \d+\.$/)
+  test("line 1 uses the caller-supplied prefix", () => {
+    const expanded = formatModelRow(PREFIX, MODEL_KEY, sameMs, 44)
+    const collapsed = formatModelRow(COLLAPSED_PREFIX, MODEL_KEY, sameMs, 44)
+    expect(lineTexts(expanded)[0].startsWith("  \u2502\u25bc ")).toBe(true)
+    expect(lineTexts(collapsed)[0].startsWith("  \u2502\u25b6 ")).toBe(true)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Exact strings at key widths
+// ---------------------------------------------------------------------------
+
+describe("exact strings", () => {
+  test("model row at 44 cols", () => {
+    const r = formatModelRow(PREFIX, MODEL_KEY, sameMs, 44)
+    expect(lineTexts(r)[0]).toBe("  \u2502\u25bc claude-4   3.4s 45tk/s 3.4s $0.0421")
+    expect(r.line2).toBe("  \u2502   3r \u219120.0k \u21938.2k \u2193r1.2k 83%")
+  })
+
+  test("model row at 37 cols drops latency, count on line 2", () => {
+    const r = formatModelRow(PREFIX, "opencode-go/deepseek-v4.1-flash", deepseek, 37)
+    expect(lineTexts(r)[0]).toBe("  \u2502\u25bc dsf-v4.1   120ms 95tk/s $0.0034")
+    expect(r.line2).toBe("  \u2502   1r \u219121.3k \u2193260 \u2193r49 0%")
+  })
+
+  test("agent names are padded to a fixed column", () => {
+    const a = formatAgentRow(PREFIX, "orchestrator", 3, sameMs, 44)
+    const b = formatAgentRow(PREFIX, "explorer", 1, sameMs, 44)
+    expect(lineTexts(a)[0]).toBe("  \u2502\u25bc orchestrator 3r 45tk/s $0.0421")
+    expect(lineTexts(b)[0]).toBe("  \u2502\u25bc explorer     1r 45tk/s $0.0421")
+    expect(b.line2).toBe("  \u2502   \u219120.0k \u21938.2k \u2193r1.2k 83%")
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Minimal tier (width < 24)
+// ---------------------------------------------------------------------------
+
+describe("minimal tier", () => {
+  test("model row is a single line with 2-space indent and no line 2", () => {
+    const r = formatModelRow(PREFIX, MODEL_KEY, sameMs, 20)
+    expect(r.line2).toBeNull()
+    const line = lineTexts(r)[0]
+    expect(line.startsWith("  ")).toBe(true)
+    expect(line.startsWith("  \u2502")).toBe(false)
+    expect(displayWidth(line)).toBeLessThanOrEqual(20)
+  })
+
+  test("agent row is a single line and keeps the colored speed", () => {
+    const r = formatAgentRow(PREFIX, "orchestrator", 2, sameMs, 20)
+    expect(r.line2).toBeNull()
+    expect(r.line1.some((s) => s.tps !== undefined)).toBe(true)
+    expect(displayWidth(lineTexts(r)[0])).toBeLessThanOrEqual(20)
+  })
+})
+
+// ---------------------------------------------------------------------------
+// Cost never truncated mid-token
+// ---------------------------------------------------------------------------
+
+describe("cost integrity", () => {
+  test("cost is never chopped at narrow widths", () => {
+    for (let width = 24; width <= 120; width++) {
+      for (const t of REPRESENTATIVE) {
+        const rows = [
+          formatModelRow(PREFIX, MODEL_KEY, t, width),
+          formatAgentRow(PREFIX, "orchestrator", 4, t, width),
+        ]
+        for (const r of rows) {
+          for (const line of lineTexts(r)) {
+            if (line.includes("$")) {
+              expect(line).not.toMatch(/\$\d+\.\d{1,3}$/)
+            }
+          }
+        }
+      }
     }
   })
 })
 
-describe("formatChildRow", () => {
-  test("marks the current session with a leading * and reserves a char for it", () => {
-    const normal = formatChildRow("session-label-xyz", exact, false, 45)
-    const current = formatChildRow("session-label-xyz", exact, true, 45)
-    expect(normal).toBe("    session-label. \u219112 \u21933 83% $0.0100")
-    expect(current).toBe("    *session-labe. \u219112 \u21933 83% $0.0100")
-    expect(current).toContain("*")
+// ---------------------------------------------------------------------------
+// Zero-token rows
+// ---------------------------------------------------------------------------
+
+describe("zero-token rows", () => {
+  // A row where all token counts are zero (errored request or empty generation).
+  const zeroTokens = totals({
+    count: 1, tpsSum: 41, ttftSum: 900, latencySum: 2100,
+    input: 0, output: 0, reasoning: 0,
+    read: 0, write: 0, cost: 0.0004,
   })
 
-  test("drops reason \u2192 \u2193out \u2192 \u2191in as the width shrinks", () => {
-    const wide = formatChildRow("session-label-xyz", dropSet, false, 60)
-    expect(wide).toBe(
-      "    session-label. \u219120.0k \u21938.2k \u2193r1.2k 83% $0.0421"
-    )
+  const ZERO_WIDTHS = [24, 28, 34, 44, 60, 80]
 
-    const noReason = formatChildRow("session-label-xyz", dropSet, false, 43)
-    expect(noReason).not.toContain("\u2193r")
-    expect(noReason).toContain("\u219120.0k")
-    expect(noReason).toContain("\u21938.2k")
-
-    const noOut = formatChildRow("session-label-xyz", dropSet, false, 36)
-    expect(noOut).not.toContain("\u21938.2k")
-    expect(noOut).toContain("\u219120.0k")
-
-    // in survives at 35 columns -- only ↓out had to go
-    const keepsIn = formatChildRow("session-label-xyz", dropSet, false, 35)
-    expect(keepsIn).toBe("    session-lab. \u219120.0k 83% $0.0421")
-    expect(keepsIn).toContain("\u219120.0k")
-    expect(keepsIn).not.toContain("\u21938.2k")
-
-    // in drops only when it genuinely cannot fit
-    const degenerate = formatChildRow("session-label-xyz", dropSet, false, 30)
-    expect(degenerate).not.toContain("\u2191")
-    expect(degenerate).not.toContain("\u2193")
-
-    for (const row of [wide, noReason, noOut, keepsIn, degenerate]) {
-      expect(row).toContain("83%")
-      expect(row).toContain("$0.0421")
+  test("zero-token model row still shows the request count on line 2", () => {
+    for (const w of ZERO_WIDTHS) {
+      const r = formatModelRow(PREFIX, MODEL_KEY, zeroTokens, w)
+      for (const line of lineTexts(r)) {
+        expect(displayWidth(line)).toBeLessThanOrEqual(w)
+      }
+      expect(r.line2!).toContain("\u2502   1r")
+      // No token arrows and no "N/A" hit rate in a zero-token row.
+      expect(r.line2).not.toContain("\u2191")
+      expect(r.line2).not.toContain("N/A")
     }
   })
 
-  test("end state keeps only label, hr and cost once every droppable field is gone", () => {
-    expect(formatChildRow("session-label-xyz", dropSet, false, 35)).toBe(
-      "    session-lab. \u219120.0k 83% $0.0421"
-    )
-    expect(formatChildRow("session-label-xyz", dropSet, false, 30)).toBe(
-      "    session-label. 83% $0.0421"
-    )
-  })
-
-  test("exact strings at 45 / 35 / 28 / 24 columns keep hr and cost intact", () => {
-    expect(formatChildRow("session-label-xyz", exact, false, 45)).toBe(
-      "    session-label. \u219112 \u21933 83% $0.0100"
-    )
-    expect(formatChildRow("session-label-xyz", exact, false, 35)).toBe(
-      "    session-lab. \u219112 \u21933 83% $0.0100"
-    )
-    expect(formatChildRow("session-label-xyz", exact, false, 28)).toBe(
-      "    session. \u219112 83% $0.0100"
-    )
-    expect(formatChildRow("session-label-xyz", exact, false, 24)).toBe(
-      "    session. 83% $0.0100"
-    )
-    expect(formatChildRow("session-label-xyz", exact, true, 45)).toBe(
-      "    *session-labe. \u219112 \u21933 83% $0.0100"
-    )
-    expect(formatChildRow("session-label-xyz", exact, true, 28)).toBe(
-      "    *sessio. \u219112 83% $0.0100"
-    )
-    expect(formatChildRow("session-label-xyz", exact, true, 24)).toBe(
-      "    *sessio. 83% $0.0100"
-    )
-  })
-
-  test("never chops hr or cost mid-token at narrow widths", () => {
-    const rows = [28, 35].flatMap((width) => [
-      formatChildRow("session-label-xyz", dropSet, false, width),
-      formatChildRow("session-label-xyz", dropSet, true, width),
-      formatChildRow("session-label-xyz", exact, false, width),
-    ])
-    for (const row of rows) {
-      expect(row).not.toMatch(/\$0\.0\.$/)
-      expect(row).not.toMatch(/ \d+\.$/)
+  test("zero-token agent row emits no detail line", () => {
+    for (const w of ZERO_WIDTHS) {
+      const r = formatAgentRow(PREFIX, "orchestrator", 1, zeroTokens, w)
+      expect(r.line2).toBeNull()
+      for (const line of lineTexts(r)) {
+        expect(displayWidth(line)).toBeLessThanOrEqual(w)
+      }
     }
-  })
-})
-
-describe("pane-width contract (no double subtraction)", () => {
-  test("agent row is budgeted at the true pane width, not pane - 8", () => {
-    // The full row is exactly 48 columns. Passed the 48-column pane width it
-    // must come back whole; a formatter that subtracts the prefix a second time
-    // would budget 44 and drop ↓r (or clip the cost).
-    const row = formatAgentRow("  \u25bc ", "orchestrator", 4, sameMs, 48)
-    expect(row).toBe(
-      "  \u25bc orchestra. 4 \u219120.0k \u21938.2k \u2193r1.2k 83% $0.0421"
-    )
-    expect(row.length).toBe(48)
-    expect(row.length).toBeGreaterThan(48 - 4)
-    expect(row.endsWith("$0.0421")).toBe(true)
-  })
-
-  test("model row is budgeted at the true pane width", () => {
-    const row = formatModelRow(MODEL_KEY, sameMs, 75)
-    expect(row).toBe(
-      "  claude-sonnet-4-20250. 3.4s 45.0/s 3 3.4s \u219120.0k \u21938.2k \u2193r1.2k 83% $0.0421"
-    )
-    expect(row.length).toBe(75)
-    expect(row.length).toBeGreaterThan(75 - 4)
-    expect(row.endsWith("$0.0421")).toBe(true)
-  })
-
-  test("child row is budgeted at the true pane width", () => {
-    const row = formatChildRow("session-label-xyz", sameMs, false, 50)
-    expect(row).toBe(
-      "    session-label. \u219120.0k \u21938.2k \u2193r1.2k 83% $0.0421"
-    )
-    expect(row.length).toBe(50)
-    expect(row.length).toBeGreaterThan(50 - 4)
-    expect(row.endsWith("$0.0421")).toBe(true)
   })
 })
